@@ -125,6 +125,7 @@ async function sendMessage() {
             }),
         });
         const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || "Server error");
         renderMessage(data.user_entry);
         for (const r of data.responses) renderMessage(r);
     } catch (err) {
@@ -156,6 +157,7 @@ async function singleModel(target) {
             }),
         });
         const data = await resp.json();
+        if (!resp.ok) throw new Error(data.detail || "Server error");
         if (data.user_entry) renderMessage(data.user_entry);
         renderMessage(data);
     } catch (err) {
@@ -217,6 +219,9 @@ async function toggleDebate() {
 async function newChat() {
     await fetch("/api/chat/new", { method: "POST" });
     chatContainer.innerHTML = "";
+    uploadedFiles = { a: [], b: [] };
+    document.getElementById("a-files").innerHTML = "";
+    document.getElementById("b-files").innerHTML = "";
 }
 
 function clearUI() {
