@@ -2,7 +2,6 @@ import os
 import io
 import re
 import base64
-import mimetypes
 from datetime import datetime
 from typing import Optional
 import httpx
@@ -67,21 +66,18 @@ def get_timestamp() -> str:
     return datetime.now().strftime("%H:%M %m/%d/%Y")
 
 
-def sanitize_text_for_history(text: str) -> str:
-    """Replaces massive base64 image strings in historical entries to prevent context bloat."""
-    if not text:
-        return ""
-    return re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', '[Attached Image]', text)
+def sanitize_history_text(text: str) -> str:
+    return re.sub(r"data:image/[^\n]*", "[Attached Image]", text)
 
 
 def format_history_for_api(active_persona_name: str) -> list:
     result = []
     for e in chat_history:
         role = "assistant" if e["name"] == active_persona_name else "user"
-        clean_text = sanitize_text_for_history(e["text"])
+        safe_text = sanitize_history_text(e["text"])
         result.append({
             "role": role,
-            "content": f"{e['name']} Responded at {e['timestamp']}:\n{clean_text}",
+            "content": f"{e['name']} Responded at {e['timestamp']}:\n{safe_text}",
         })
     return result
 
@@ -111,22 +107,24 @@ async def call_model(profile, opposing_profile) -> str:
         {"role": "system", "content": build_system_prompt(profile, opposing_profile)},
     ]
 
-    # Dynamically handle text documents vs base64 vision images
     if profile["rag_text"]:
-        rag_content = profile["rag_text"]
-        if rag_content.startswith("data:image/"):
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "[SYSTEM NOTIFICATION: The user attached the following reference image for analysis]:"},
-                    {"type": "image_url", "image_url": {"url": rag_content}}
-                ]
-            })
-        else:
-            messages.append({
-                "role": "user",
-                "content": f"[SYSTEM NOTIFICATION: The user has attached the following reference document context for your verification. Review this data closely to answer subsequent prompts]:\n\n{rag_content}",
-            })
+        chunks = re.split(r"\n\n---\n\n", profile["rag_text"])
+        text_parts = []
+        image_urls = []
+        for chunk in chunks:
+            if chunk.startswith("data:image/"):
+                image_urls.append(chunk)
+            else:
+                text_parts.append(chunk)
+
+        rag_content = []
+        if text_parts:
+            rag_content.append({"type": "text", "text": "[SYSTEM NOTIFICATION: The user has attached the following reference document context for your verification. Review this data closely to answer subsequent prompts]:\n\n" + "\n\n".join(text_parts)})
+        for img in image_urls:
+            rag_content.append({"type": "image_url", "image_url": {"url": img}})
+
+        if rag_content:
+            messages.append({"role": "user", "content": rag_content})
 
     messages.extend(format_history_for_api(profile["persona_name"]))
 
@@ -136,44 +134,28 @@ async def call_model(profile, opposing_profile) -> str:
         "temperature": profile["temperature"],
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(endpoint, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
             return data["choices"][0]["message"]["content"]
-        except httpx.HTTPStatusError as e:
-            error_body = e.response.text
-            print(f"[ERROR] Inference server at {endpoint} returned HTTP {e.response.status_code}: {error_body}")
-            raise HTTPException(
-                status_code=e.response.status_code,
-                detail=f"Inference Server Error ({e.response.status_code}): {error_body}"
-            )
-        except httpx.RequestError as e:
-            print(f"[ERROR] Connection failed to {endpoint}: {e}")
-            raise HTTPException(
-                status_code=502,
-                detail=f"Could not connect to inference server at {endpoint}. Verify the model server is running."
-            )
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=f"Model API error: {e.response.text}")
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Model API unreachable: {e}")
 
 
 def parse_file_content(file: UploadFile) -> str:
     content = file.file.read()
-    filename = file.filename or ""
-    ext = filename.lower().split(".")[-1] if "." in filename else ""
-
-    # Image files -> Encode as base64 Data URI for vision models
-    if ext in ["jpg", "jpeg", "png", "webp", "gif"]:
-        mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext}"
-        b64_str = base64.b64encode(content).decode("utf-8")
-        return f"data:{mime_type};base64,{b64_str}"
-
-    # PDF files -> Extract text
+    ext = (file.filename or "").lower().split(".")[-1]
+    if ext in ("jpg", "jpeg", "png", "webp", "gif"):
+        mime = f"image/{ext}" if ext != "jpeg" else "image/jpeg"
+        b64 = base64.b64encode(content).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
     if ext == "pdf":
         reader = PyPDF2.PdfReader(io.BytesIO(content))
         return "\n\n".join(page.extract_text() or "" for page in reader.pages)
-
-    # Standard Text files (.txt, .md, .py, etc.)
     return content.decode("utf-8", errors="replace")
 
 
@@ -186,9 +168,7 @@ def update_profile(target: str, config: ProfileConfig):
     p["api_endpoint"] = config.api_endpoint
     p["auth_key"] = config.auth_key
     p["model_name"] = config.model_name
-    
-    # Preserve server-side uploaded RAG text when client passes empty rag_text during chat submits
-    if config.rag_text and config.rag_text.strip():
+    if config.rag_text:
         p["rag_text"] = config.rag_text
 
 
@@ -209,44 +189,44 @@ async def chat(request: ChatRequest):
     update_profile("a", request.profile_a)
     update_profile("b", request.profile_b)
 
-    user_ts = get_timestamp()
+    ts = get_timestamp()
     chat_history.append({
         "role": "user",
         "name": "User",
         "text": request.message,
-        "timestamp": user_ts,
+        "timestamp": ts,
     })
 
     new_entries = []
 
     a_response = await call_model(profile_a, profile_b)
-    ts_a = get_timestamp()
+    ts = get_timestamp()
     chat_history.append({
         "role": "assistant",
         "name": profile_a["persona_name"],
         "text": a_response,
-        "timestamp": ts_a,
+        "timestamp": ts,
     })
     new_entries.append({
         "role": "assistant",
         "name": profile_a["persona_name"],
         "text": a_response,
-        "timestamp": ts_a,
+        "timestamp": ts,
     })
 
     b_response = await call_model(profile_b, profile_a)
-    ts_b = get_timestamp()
+    ts = get_timestamp()
     chat_history.append({
         "role": "assistant",
         "name": profile_b["persona_name"],
         "text": b_response,
-        "timestamp": ts_b,
+        "timestamp": ts,
     })
     new_entries.append({
         "role": "assistant",
         "name": profile_b["persona_name"],
         "text": b_response,
-        "timestamp": ts_b,
+        "timestamp": ts,
     })
 
     return {
@@ -254,7 +234,7 @@ async def chat(request: ChatRequest):
             "role": "user",
             "name": "User",
             "text": request.message,
-            "timestamp": user_ts,
+            "timestamp": ts,
         },
         "responses": new_entries,
     }
@@ -268,18 +248,18 @@ async def single_model(request: SingleModelRequest):
 
     user_entry = None
     if request.message:
-        user_ts = get_timestamp()
+        ts = get_timestamp()
         chat_history.append({
             "role": "user",
             "name": "User",
             "text": request.message,
-            "timestamp": user_ts,
+            "timestamp": ts,
         })
         user_entry = {
             "role": "user",
             "name": "User",
             "text": request.message,
-            "timestamp": user_ts,
+            "timestamp": ts,
         }
 
     if request.target == "a":
@@ -288,19 +268,19 @@ async def single_model(request: SingleModelRequest):
         active, opposing = profile_b, profile_a
 
     response = await call_model(active, opposing)
-    resp_ts = get_timestamp()
+    ts = get_timestamp()
     chat_history.append({
         "role": "assistant",
         "name": active["persona_name"],
         "text": response,
-        "timestamp": resp_ts,
+        "timestamp": ts,
     })
 
     result = {
         "role": "assistant",
         "name": active["persona_name"],
         "text": response,
-        "timestamp": resp_ts,
+        "timestamp": ts,
     }
     if user_entry:
         result["user_entry"] = user_entry
@@ -310,10 +290,10 @@ async def single_model(request: SingleModelRequest):
 @app.post("/api/chat/new")
 async def new_chat():
     global chat_history, profile_a, profile_b
-    chat_history.clear()
+    chat_history = []
     profile_a["rag_text"] = ""
     profile_b["rag_text"] = ""
-    return {"status": "ok", "message": "Chat history and RAG buffers cleared."}
+    return {"status": "ok"}
 
 
 @app.get("/api/export")
