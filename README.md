@@ -34,7 +34,7 @@ ConvoGreen's multi-agent architecture draws inspiration from established researc
 ## Quick Start
 
 1. Clone the repository:
-   ```bash
-   git clone [https://github.com/CutWire22/ConvoGreen.git](https://github.com/CutWire22/ConvoGreen.git)
-   cd ConvoGreen
-   
+```bash
+git clone https://github.com/CutWire22/ConvoGreen.git
+cd ConvoGreen
+```
