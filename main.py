@@ -1,6 +1,8 @@
 import os
 import io
 import re
+import base64
+import mimetypes
 from datetime import datetime
 from typing import Optional
 import httpx
@@ -66,10 +68,9 @@ def get_timestamp() -> str:
 
 
 def sanitize_text_for_history(text: str) -> str:
-    """Replaces massive base64 image strings with lightweight placeholders to prevent context bloat."""
+    """Replaces massive base64 image strings in historical entries to prevent context bloat."""
     if not text:
         return ""
-    # Strip base64 data URIs if they exist in text
     return re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', '[Attached Image]', text)
 
 
@@ -109,11 +110,24 @@ async def call_model(profile, opposing_profile) -> str:
     messages = [
         {"role": "system", "content": build_system_prompt(profile, opposing_profile)},
     ]
+
+    # Dynamically handle text documents vs base64 vision images
     if profile["rag_text"]:
-        messages.append({
-            "role": "user",
-            "content": f"[SYSTEM NOTIFICATION: The user has attached the following reference document context for your verification. Review this data closely to answer subsequent prompts]:\n\n{profile['rag_text']}",
-        })
+        rag_content = profile["rag_text"]
+        if rag_content.startswith("data:image/"):
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "[SYSTEM NOTIFICATION: The user attached the following reference image for analysis]:"},
+                    {"type": "image_url", "image_url": {"url": rag_content}}
+                ]
+            })
+        else:
+            messages.append({
+                "role": "user",
+                "content": f"[SYSTEM NOTIFICATION: The user has attached the following reference document context for your verification. Review this data closely to answer subsequent prompts]:\n\n{rag_content}",
+            })
+
     messages.extend(format_history_for_api(profile["persona_name"]))
 
     payload = {
@@ -145,9 +159,21 @@ async def call_model(profile, opposing_profile) -> str:
 
 def parse_file_content(file: UploadFile) -> str:
     content = file.file.read()
-    if file.filename and file.filename.lower().endswith(".pdf"):
+    filename = file.filename or ""
+    ext = filename.lower().split(".")[-1] if "." in filename else ""
+
+    # Image files -> Encode as base64 Data URI for vision models
+    if ext in ["jpg", "jpeg", "png", "webp", "gif"]:
+        mime_type = mimetypes.guess_type(filename)[0] or f"image/{ext}"
+        b64_str = base64.b64encode(content).decode("utf-8")
+        return f"data:{mime_type};base64,{b64_str}"
+
+    # PDF files -> Extract text
+    if ext == "pdf":
         reader = PyPDF2.PdfReader(io.BytesIO(content))
         return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+
+    # Standard Text files (.txt, .md, .py, etc.)
     return content.decode("utf-8", errors="replace")
 
 
@@ -160,8 +186,10 @@ def update_profile(target: str, config: ProfileConfig):
     p["api_endpoint"] = config.api_endpoint
     p["auth_key"] = config.auth_key
     p["model_name"] = config.model_name
-    # Allows clearing rag_text when config.rag_text is empty or None
-    p["rag_text"] = config.rag_text if config.rag_text is not None else ""
+    
+    # Preserve server-side uploaded RAG text when client passes empty rag_text during chat submits
+    if config.rag_text and config.rag_text.strip():
+        p["rag_text"] = config.rag_text
 
 
 @app.get("/")
