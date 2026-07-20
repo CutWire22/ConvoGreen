@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ConvoGreen</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { scrollbar-width: thin; scrollbar-color: #1a4a40 #072a24; }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #072a24; }
+        ::-webkit-scrollbar-thumb { background: #1a4a40; border-radius: 3px; }
+        textarea { resize: none; }
+        textarea:focus, input:focus { outline: none; }
+        .msg-user { border-left: 2px solid #3a6b60; }
+        .msg-assistant { border-left: 2px solid #143d35; }
+        .drop-zone.dragover { border-color: #3a6b60; background: #0d352e; }
+    </style>
+</head>
+<body class="h-screen max-h-screen overflow-hidden p-4 bg-[#0b1110] grid grid-cols-12 gap-4 text-[#ecf2f0] font-mono text-sm">
+
+    <!-- Profile A Panel -->
+    <div id="panel-a" class="col-span-3 flex flex-col gap-3 bg-[#072a24] border border-[#143d35] p-4 overflow-y-auto">
+        <h2 class="text-[#c9d6d3] text-xs uppercase tracking-widest font-bold border-b border-[#143d35] pb-2">Profile A</h2>
+
+        <label class="text-[#63857e] text-xs">Persona Name</label>
+        <input id="a-name" type="text" value="Model A" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs">
+
+        <label class="text-[#63857e] text-xs">System Prompt</label>
+        <textarea id="a-system" rows="4" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="System instructions..."></textarea>
+
+        <label class="text-[#63857e] text-xs flex justify-between">
+            <span>Temperature</span><span id="a-temp-val" class="text-[#c9d6d3]">1.0</span>
+        </label>
+        <input id="a-temp" type="range" min="0" max="2" step="0.1" value="1.0" class="w-full accent-[#3a6b60]">
+
+        <label class="text-[#63857e] text-xs">API Endpoint</label>
+        <input id="a-endpoint" type="text" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="http://localhost:11434">
+
+        <label class="text-[#63857e] text-xs">Auth Key</label>
+        <input id="a-key" type="password" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="Optional bearer token">
+
+        <label class="text-[#63857e] text-xs">Model Name</label>
+        <input id="a-model" type="text" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="e.g. qwen3.6-27b">
+
+        <label class="text-[#63857e] text-xs">RAG / Local Context</label>
+        <div id="a-drop" class="drop-zone border-2 border-dashed border-[#143d35] rounded px-3 py-4 text-center text-[#63857e] text-xs cursor-pointer hover:border-[#3a6b60] transition">
+            Drop files or click to upload
+            <input id="a-file" type="file" multiple class="hidden" accept=".txt,.pdf,.md,.csv,.json">
+        </div>
+        <div id="a-files" class="text-[#63857e] text-xs space-y-1"></div>
+
+        <button onclick="saveProfile('a')" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-4 py-2 text-xs uppercase tracking-wider mt-auto">Save Profile A</button>
+    </div>
+
+    <!-- Center Chat Console -->
+    <div class="col-span-6 flex flex-col h-full overflow-hidden bg-[#072a24] border border-[#143d35]">
+        <!-- Header -->
+        <div class="flex justify-between items-center px-4 py-3 border-b border-[#143d35]">
+            <h1 class="text-[#c9d6d3] text-xs uppercase tracking-widest font-bold">ConvoGreen</h1>
+            <div class="flex gap-2">
+                <button onclick="newChat()" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-3 py-1 text-xs uppercase tracking-wider">New Chat</button>
+                <button onclick="exportChat()" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-3 py-1 text-xs uppercase tracking-wider">Export</button>
+            </div>
+        </div>
+
+        <!-- Chat Messages -->
+        <div id="chat-container" class="flex-1 overflow-y-auto min-h-0 px-4 py-3 space-y-4 pr-2"></div>
+
+        <!-- Input Bar -->
+        <div class="px-4 pb-2">
+            <div class="flex gap-2">
+                <textarea id="user-input" rows="2" class="flex-1 bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="Type a message..."></textarea>
+                <button onclick="sendMessage()" id="send-btn" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-4 py-2 text-xs uppercase tracking-wider">Send</button>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="px-4 pb-4 flex gap-2 flex-wrap">
+            <button onclick="singleModel('a')" id="btn-model-a" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-3 py-1.5 text-xs uppercase tracking-wider">Let Model A Answer</button>
+            <button onclick="singleModel('b')" id="btn-model-b" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-3 py-1.5 text-xs uppercase tracking-wider">Let Model B Answer</button>
+            <button onclick="toggleDebate()" id="btn-debate" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-3 py-1.5 text-xs uppercase tracking-wider">Start Debate</button>
+        </div>
+    </div>
+
+    <!-- Profile B Panel -->
+    <div id="panel-b" class="col-span-3 flex flex-col gap-3 bg-[#072a24] border border-[#143d35] p-4 overflow-y-auto">
+        <h2 class="text-[#c9d6d3] text-xs uppercase tracking-widest font-bold border-b border-[#143d35] pb-2">Profile B</h2>
+
+        <label class="text-[#63857e] text-xs">Persona Name</label>
+        <input id="b-name" type="text" value="Model B" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs">
+
+        <label class="text-[#63857e] text-xs">System Prompt</label>
+        <textarea id="b-system" rows="4" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="System instructions..."></textarea>
+
+        <label class="text-[#63857e] text-xs flex justify-between">
+            <span>Temperature</span><span id="b-temp-val" class="text-[#c9d6d3]">1.0</span>
+        </label>
+        <input id="b-temp" type="range" min="0" max="2" step="0.1" value="1.0" class="w-full accent-[#3a6b60]">
+
+        <label class="text-[#63857e] text-xs">API Endpoint</label>
+        <input id="b-endpoint" type="text" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="http://localhost:11434">
+
+        <label class="text-[#63857e] text-xs">Auth Key</label>
+        <input id="b-key" type="password" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="Optional bearer token">
+
+        <label class="text-[#63857e] text-xs">Model Name</label>
+        <input id="b-model" type="text" class="w-full bg-[#0b1110] border border-[#143d35] px-3 py-2 text-[#ecf2f0] text-xs" placeholder="e.g. gemma-4-31b-it">
+
+        <label class="text-[#63857e] text-xs">RAG / Local Context</label>
+        <div id="b-drop" class="drop-zone border-2 border-dashed border-[#143d35] rounded px-3 py-4 text-center text-[#63857e] text-xs cursor-pointer hover:border-[#3a6b60] transition">
+            Drop files or click to upload
+            <input id="b-file" type="file" multiple class="hidden" accept=".txt,.pdf,.md,.csv,.json">
+        </div>
+        <div id="b-files" class="text-[#63857e] text-xs space-y-1"></div>
+
+        <button onclick="saveProfile('b')" class="border border-[#4a7c71] text-[#e0e8e6] hover:bg-[#10463c] transition px-4 py-2 text-xs uppercase tracking-wider mt-auto">Save Profile B</button>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
