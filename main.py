@@ -1,5 +1,6 @@
 import os
 import io
+import re
 from datetime import datetime
 from typing import Optional
 import httpx
@@ -64,13 +65,22 @@ def get_timestamp() -> str:
     return datetime.now().strftime("%H:%M %m/%d/%Y")
 
 
+def sanitize_text_for_history(text: str) -> str:
+    """Replaces massive base64 image strings with lightweight placeholders to prevent context bloat."""
+    if not text:
+        return ""
+    # Strip base64 data URIs if they exist in text
+    return re.sub(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', '[Attached Image]', text)
+
+
 def format_history_for_api(active_persona_name: str) -> list:
     result = []
     for e in chat_history:
         role = "assistant" if e["name"] == active_persona_name else "user"
+        clean_text = sanitize_text_for_history(e["text"])
         result.append({
             "role": role,
-            "content": f"{e['name']} Responded at {e['timestamp']}:\n{e['text']}",
+            "content": f"{e['name']} Responded at {e['timestamp']}:\n{clean_text}",
         })
     return result
 
@@ -113,10 +123,24 @@ async def call_model(profile, opposing_profile) -> str:
     }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(endpoint, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        try:
+            resp = await client.post(endpoint, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            error_body = e.response.text
+            print(f"[ERROR] Inference server at {endpoint} returned HTTP {e.response.status_code}: {error_body}")
+            raise HTTPException(
+                status_code=e.response.status_code,
+                detail=f"Inference Server Error ({e.response.status_code}): {error_body}"
+            )
+        except httpx.RequestError as e:
+            print(f"[ERROR] Connection failed to {endpoint}: {e}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not connect to inference server at {endpoint}. Verify the model server is running."
+            )
 
 
 def parse_file_content(file: UploadFile) -> str:
@@ -136,8 +160,8 @@ def update_profile(target: str, config: ProfileConfig):
     p["api_endpoint"] = config.api_endpoint
     p["auth_key"] = config.auth_key
     p["model_name"] = config.model_name
-    if config.rag_text:
-        p["rag_text"] = config.rag_text
+    # Allows clearing rag_text when config.rag_text is empty or None
+    p["rag_text"] = config.rag_text if config.rag_text is not None else ""
 
 
 @app.get("/")
@@ -157,44 +181,44 @@ async def chat(request: ChatRequest):
     update_profile("a", request.profile_a)
     update_profile("b", request.profile_b)
 
-    ts = get_timestamp()
+    user_ts = get_timestamp()
     chat_history.append({
         "role": "user",
         "name": "User",
         "text": request.message,
-        "timestamp": ts,
+        "timestamp": user_ts,
     })
 
     new_entries = []
 
     a_response = await call_model(profile_a, profile_b)
-    ts = get_timestamp()
+    ts_a = get_timestamp()
     chat_history.append({
         "role": "assistant",
         "name": profile_a["persona_name"],
         "text": a_response,
-        "timestamp": ts,
+        "timestamp": ts_a,
     })
     new_entries.append({
         "role": "assistant",
         "name": profile_a["persona_name"],
         "text": a_response,
-        "timestamp": ts,
+        "timestamp": ts_a,
     })
 
     b_response = await call_model(profile_b, profile_a)
-    ts = get_timestamp()
+    ts_b = get_timestamp()
     chat_history.append({
         "role": "assistant",
         "name": profile_b["persona_name"],
         "text": b_response,
-        "timestamp": ts,
+        "timestamp": ts_b,
     })
     new_entries.append({
         "role": "assistant",
         "name": profile_b["persona_name"],
         "text": b_response,
-        "timestamp": ts,
+        "timestamp": ts_b,
     })
 
     return {
@@ -202,7 +226,7 @@ async def chat(request: ChatRequest):
             "role": "user",
             "name": "User",
             "text": request.message,
-            "timestamp": ts,
+            "timestamp": user_ts,
         },
         "responses": new_entries,
     }
@@ -216,18 +240,18 @@ async def single_model(request: SingleModelRequest):
 
     user_entry = None
     if request.message:
-        ts = get_timestamp()
+        user_ts = get_timestamp()
         chat_history.append({
             "role": "user",
             "name": "User",
             "text": request.message,
-            "timestamp": ts,
+            "timestamp": user_ts,
         })
         user_entry = {
             "role": "user",
             "name": "User",
             "text": request.message,
-            "timestamp": ts,
+            "timestamp": user_ts,
         }
 
     if request.target == "a":
@@ -236,19 +260,19 @@ async def single_model(request: SingleModelRequest):
         active, opposing = profile_b, profile_a
 
     response = await call_model(active, opposing)
-    ts = get_timestamp()
+    resp_ts = get_timestamp()
     chat_history.append({
         "role": "assistant",
         "name": active["persona_name"],
         "text": response,
-        "timestamp": ts,
+        "timestamp": resp_ts,
     })
 
     result = {
         "role": "assistant",
         "name": active["persona_name"],
         "text": response,
-        "timestamp": ts,
+        "timestamp": resp_ts,
     }
     if user_entry:
         result["user_entry"] = user_entry
@@ -257,9 +281,11 @@ async def single_model(request: SingleModelRequest):
 
 @app.post("/api/chat/new")
 async def new_chat():
-    global chat_history
-    chat_history = []
-    return {"status": "ok"}
+    global chat_history, profile_a, profile_b
+    chat_history.clear()
+    profile_a["rag_text"] = ""
+    profile_b["rag_text"] = ""
+    return {"status": "ok", "message": "Chat history and RAG buffers cleared."}
 
 
 @app.get("/api/export")
