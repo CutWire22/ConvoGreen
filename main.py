@@ -135,7 +135,7 @@ async def call_model(profile, opposing_profile) -> str:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0)) as client:
             resp = await client.post(endpoint, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
